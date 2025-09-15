@@ -43,7 +43,7 @@ namespace WpfChatClient
                     break;
 
                 case "join":
-                    if(username == "System") break;
+                    if (username == "System") break;
                     displayMessage = $"[{timestamp}] {username} joined the chat.";
                     // Chỉ thêm user thật vào danh sách, không thêm "System"
                     if (username != "System" && !_onlineUsers.Contains(username))
@@ -195,6 +195,7 @@ namespace WpfChatClient
         private async Task ReceiveMessagesAsync()
         {
             var buffer = new byte[4096];
+            var sb = new StringBuilder(); // 👈 dùng để giữ message chưa trọn vẹn
 
             try
             {
@@ -207,16 +208,34 @@ namespace WpfChatClient
 
                     if (received == 0) break;
 
-                    var messageJson = Encoding.UTF8.GetString(buffer, 0, received);
-                    var chatMessage = JsonSerializer.Deserialize<ChatMessage>(messageJson);
+                    sb.Append(Encoding.UTF8.GetString(buffer, 0, received));
+                    string data = sb.ToString();
 
-                    if (chatMessage != null)
+                    int newlineIndex;
+                    while ((newlineIndex = data.IndexOf('\n')) >= 0)
                     {
-                        Dispatcher.Invoke(() =>
+                        var singleJson = data[..newlineIndex]; // lấy 1 message
+                        data = data[(newlineIndex + 1)..];      // cắt phần đã xử lý
+
+                        try
                         {
-                            AddMessage(chatMessage.Username, chatMessage.Message, chatMessage.MessageType);
-                        });
+                            var chatMessage = JsonSerializer.Deserialize<ChatMessage>(singleJson);
+                            if (chatMessage != null)
+                            {
+                                Dispatcher.Invoke(() =>
+                                {
+                                    AddMessage(chatMessage.Username, chatMessage.Message, chatMessage.MessageType);
+                                });
+                            }
+                        }
+                        catch (JsonException ex)
+                        {
+                            Dispatcher.Invoke(() => AddMessage("System", $"JSON error: {ex.Message}", "error"));
+                        }
                     }
+
+                    sb.Clear();
+                    sb.Append(data); // giữ lại phần còn dư chưa thành message hoàn chỉnh
                 }
             }
             catch (Exception ex)

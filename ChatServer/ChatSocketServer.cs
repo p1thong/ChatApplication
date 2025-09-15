@@ -115,7 +115,7 @@ namespace ChatServer
         private async Task SendUserListToAllClientsAsync()
         {
             var userList = _clients.Values.Select(c => c.Username).Where(u => !string.IsNullOrEmpty(u)).ToList();
-            
+
             var userListMessage = new ChatMessage
             {
                 Username = "ServerUserList",
@@ -136,7 +136,7 @@ namespace ChatServer
 
         private async Task BroadcastMessageAsync(ChatMessage message)
         {
-            var messageJson = JsonSerializer.Serialize(message);
+            var messageJson = JsonSerializer.Serialize(message) + "\n"; // 👈 Thêm newline
             var messageBytes = Encoding.UTF8.GetBytes(messageJson);
 
             _logger.LogInformation($"Broadcasting message: {messageJson}");
@@ -163,7 +163,6 @@ namespace ChatServer
                 }
             }
 
-            // Remove disconnected clients
             foreach (var clientId in disconnectedClients)
             {
                 _clients.TryRemove(clientId, out _);
