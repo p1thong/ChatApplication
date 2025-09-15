@@ -34,7 +34,7 @@ namespace WpfChatClient
             string displayMessage = "";
 
             // Chặn tất cả message từ "System" 
-            if (username == "System") return;
+            // if (username == "System") return;
 
             switch (messageType)
             {
@@ -43,6 +43,7 @@ namespace WpfChatClient
                     break;
 
                 case "join":
+                    if(username == "System") break;
                     displayMessage = $"[{timestamp}] {username} joined the chat.";
                     // Chỉ thêm user thật vào danh sách, không thêm "System"
                     if (username != "System" && !_onlineUsers.Contains(username))
@@ -114,7 +115,7 @@ namespace WpfChatClient
                 UpdateUI(true);
 
                 // Chỉ thêm chính mình vào danh sách, không thêm "System"
-                AddMessage(_username, "", "join");
+                // AddMessage(_username, "", "join");
 
                 // Gửi thông điệp join lên server để broadcast cho những người khác
                 var joinMessage = new ChatMessage
