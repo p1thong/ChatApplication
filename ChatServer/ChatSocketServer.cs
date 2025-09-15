@@ -67,13 +67,16 @@ namespace ChatServer
                             _clients.TryAdd(clientInfo.Id, clientInfo);
                             _logger.LogInformation($"User {chatMessage.Username} joined the chat");
 
-                            // Notify all clients about new user
+                            // Gửi message join với username thật, không phải "System"
                             await BroadcastMessageAsync(new ChatMessage
                             {
-                                Username = "System",
-                                Message = $"{chatMessage.Username} joined the chat",
+                                Username = chatMessage.Username,
+                                Message = "",
                                 MessageType = "join"
                             });
+
+                            // Gửi danh sách tất cả users hiện tại cho client mới join
+                            await SendUserListToAllClientsAsync();
                         }
                         else if (chatMessage.MessageType == "message")
                         {
@@ -93,17 +96,34 @@ namespace ChatServer
                 {
                     _logger.LogInformation($"User {clientInfo.Username} disconnected");
 
-                    // Notify remaining clients
+                    // Gửi message leave với username thật
                     await BroadcastMessageAsync(new ChatMessage
                     {
-                        Username = "System",
-                        Message = $"{clientInfo.Username} left the chat",
+                        Username = clientInfo.Username,
+                        Message = "",
                         MessageType = "leave"
                     });
+
+                    // Cập nhật danh sách user sau khi có người rời
+                    await SendUserListToAllClientsAsync();
                 }
 
                 clientSocket.Close();
             }
+        }
+
+        private async Task SendUserListToAllClientsAsync()
+        {
+            var userList = _clients.Values.Select(c => c.Username).Where(u => !string.IsNullOrEmpty(u)).ToList();
+            
+            var userListMessage = new ChatMessage
+            {
+                Username = "ServerUserList",
+                Message = string.Join(",", userList),
+                MessageType = "userlist"
+            };
+
+            await BroadcastMessageAsync(userListMessage);
         }
 
         private async Task<int> ReceiveAsync(Socket socket, byte[] buffer)
