@@ -32,7 +32,10 @@ namespace WpfChatClient
         {
             var timestamp = DateTime.Now.ToString("HH:mm:ss");
             string displayMessage = "";
-                if(username == "System") return;
+
+            // Chặn tất cả message từ "System" 
+            if (username == "System") return;
+
             switch (messageType)
             {
                 case "message":
@@ -40,7 +43,6 @@ namespace WpfChatClient
                     break;
 
                 case "join":
-
                     displayMessage = $"[{timestamp}] {username} joined the chat.";
                     // Chỉ thêm user thật vào danh sách, không thêm "System"
                     if (username != "System" && !_onlineUsers.Contains(username))
@@ -52,19 +54,44 @@ namespace WpfChatClient
                     _onlineUsers.Remove(username);
                     break;
 
+                case "userlist":
+                    // Xử lý danh sách user từ server
+                    if (username == "ServerUserList")
+                    {
+                        _onlineUsers.Clear();
+                        if (!string.IsNullOrEmpty(message))
+                        {
+                            var users = message.Split(',');
+                            foreach (var user in users)
+                            {
+                                if (!string.IsNullOrWhiteSpace(user))
+                                    _onlineUsers.Add(user.Trim());
+                            }
+                        }
+                        lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
+                        return; // Không hiển thị message này trong chat
+                    }
+                    break;
+
                 case "system":
                     displayMessage = $"[{timestamp}] {message}";
-                    // System messages không thêm vào user list
                     break;
 
                 case "error":
                     displayMessage = $"[{timestamp}] ERROR: {message}";
                     break;
+
+                default:
+                    return; // Bỏ qua message type không xác định
             }
 
-            lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
-            txtMessages.Text += displayMessage + Environment.NewLine;
-            scrollViewer.ScrollToEnd();
+            // Chỉ hiển thị message nếu có nội dung
+            if (!string.IsNullOrEmpty(displayMessage))
+            {
+                lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
+                txtMessages.Text += displayMessage + Environment.NewLine;
+                scrollViewer.ScrollToEnd();
+            }
         }
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
