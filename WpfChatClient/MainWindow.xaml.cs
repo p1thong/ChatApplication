@@ -230,12 +230,6 @@ namespace WpfChatClient
                             // 🟢 Xử lý file info
                             if (chatMessage.MessageType == "fileinfo")
                             {
-                                if (string.IsNullOrEmpty(chatMessage.Message))
-                                {
-                                    Dispatcher.Invoke(() => AddMessage("System", "Received empty file info!", "error"));
-                                    continue;
-                                }
-
                                 var parts = chatMessage.Message.Split('|');
                                 if (parts.Length < 2 || !long.TryParse(parts[1], out long fileSize))
                                 {
@@ -248,7 +242,15 @@ namespace WpfChatClient
                                 _bytesReceived = 0;
                                 _receivedFileBuffer = new MemoryStream();
 
-                                Dispatcher.Invoke(() => AddMessage("System", $"Receiving file: {_receivingFile} ({fileSize / 1024.0 / 1024.0:F2} MB)", "system"));
+                                Dispatcher.Invoke(() =>
+                                {
+                                    // Hiển thị thông báo với nút Save (ban đầu disabled)
+                                    AddMessage("System", $"Receiving file: {_receivingFile} ({fileSize / 1024.0 / 1024.0:F2} MB)", "system");
+                                    btnSaveReceivedFile.Visibility = Visibility.Visible;
+                                    btnSaveReceivedFile.Content = $"Save {_receivingFile}";
+                                    btnSaveReceivedFile.IsEnabled = false; // chưa cho lưu khi chưa xong
+                                });
+
                                 continue;
                             }
 
@@ -264,32 +266,19 @@ namespace WpfChatClient
                                     await _receivedFileBuffer.WriteAsync(fileBytes, 0, fileBytes.Length);
                                     _bytesReceived += fileBytes.Length;
 
-                                    Dispatcher.Invoke(() => lblStatus.Text = $"Downloading {_receivingFile}: {_bytesReceived * 100 / _expectedFileSize}%");
+                                    Dispatcher.Invoke(() =>
+                                    {
+                                        lblStatus.Text = $"Downloading {_receivingFile}: {_bytesReceived * 100 / _expectedFileSize}%";
+                                    });
 
                                     if (_bytesReceived >= _expectedFileSize)
                                     {
-                                        // Khi nhận xong, hỏi người dùng có muốn lưu file không
                                         Dispatcher.Invoke(() =>
                                         {
-                                            var dialog = new Microsoft.Win32.SaveFileDialog
-                                            {
-                                                FileName = _receivingFile,
-                                                Filter = "All files|*.*"
-                                            };
-
-                                            if (dialog.ShowDialog() == true)
-                                            {
-                                                File.WriteAllBytes(dialog.FileName, _receivedFileBuffer.ToArray());
-                                                AddMessage("System", $"File saved to: {dialog.FileName}", "system");
-                                            }
-                                            else
-                                            {
-                                                AddMessage("System", $"File '{_receivingFile}' was not saved.", "system");
-                                            }
+                                            lblStatus.Text = "Download complete";
+                                            btnSaveReceivedFile.IsEnabled = true; // cho phép lưu
+                                            AddMessage("System", $"File {_receivingFile} ready to save", "system");
                                         });
-
-                                        _receivedFileBuffer.Dispose();
-                                        _receivedFileBuffer = null;
                                     }
                                 }
                                 catch (FormatException ex)
@@ -324,6 +313,7 @@ namespace WpfChatClient
                 }
             }
         }
+
 
         private void UpdateUI(bool connected)
         {
@@ -473,6 +463,35 @@ namespace WpfChatClient
                 _clientSocket.EndSend,
                 null);
         }
+
+        private void BtnSaveReceivedFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (_receivedFileBuffer == null || _receivedFileBuffer.Length == 0)
+            {
+                AddMessage("System", "No file to save!", "error");
+                return;
+            }
+
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = _receivingFile,
+                Filter = "All files|*.*"
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                File.WriteAllBytes(dialog.FileName, _receivedFileBuffer.ToArray());
+                AddMessage("System", $"File saved to: {dialog.FileName}", "system");
+            }
+
+            // Reset nút
+            btnSaveReceivedFile.Visibility = Visibility.Collapsed;
+            btnSaveReceivedFile.IsEnabled = false;
+            _receivedFileBuffer.Dispose();
+            _receivedFileBuffer = null;
+        }
+
+
 
 
     }

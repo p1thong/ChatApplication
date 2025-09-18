@@ -138,7 +138,7 @@ namespace ChatServer
             }
         }
 
-        private async Task BroadcastRawAsync(byte[] messageBytes)
+        private async Task BroadcastRawAsync(byte[] messageBytes, string? excludeClientId = null)
         {
             _logger.LogInformation($"Broadcasting raw message ({messageBytes.Length} bytes)");
 
@@ -147,6 +147,10 @@ namespace ChatServer
             {
                 try
                 {
+                    // 🔑 Bỏ qua người gửi (nếu truyền excludeClientId)
+                    if (excludeClientId != null && client.Id == excludeClientId)
+                        continue;
+
                     if (client.Socket.Connected)
                     {
                         await SendAsync(client.Socket, messageBytes);
@@ -168,7 +172,6 @@ namespace ChatServer
                 _clients.TryRemove(id, out _);
             }
         }
-
 
 
         private async Task SendUserListToAllClientsAsync()
