@@ -267,7 +267,7 @@ namespace WpfChatClient
                                 Dispatcher.Invoke(() =>
                                 {
                                     UpdateFileProgress(_bytesReceived);
-                                    lblStatus.Text = $"Downloading {_receivingFile}: {_bytesReceived * 100 / _expectedFileSize}%";
+                                    lblStatus.Text = $"receiving {_receivingFile}: {_bytesReceived * 100 / _expectedFileSize}%";
                                 });
 
                                 if (_bytesReceived >= _expectedFileSize)
@@ -324,7 +324,8 @@ namespace WpfChatClient
                 Minimum = 0,
                 Maximum = fileSize,
                 Height = 10,
-                Margin = new Thickness(0, 5, 0, 5)
+                Margin = new Thickness(0, 5, 0, 5),
+                Foreground = Brushes.Blue // ✅ màu xanh cho bên nhận
             };
 
             _currentSaveButton = new Button
@@ -343,6 +344,33 @@ namespace WpfChatClient
             chatPanel.Children.Add(_currentFilePanel);
             ScrollToBottom();
         }
+
+        private void ShowFileSendingUI(string fileName, long fileSize)
+        {
+            _currentFilePanel = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(5) };
+
+            var txt = new TextBlock
+            {
+                Text = $"Uploading file: {fileName} ({fileSize / 1024.0 / 1024.0:F2} MB)",
+                Foreground = Brushes.OrangeRed
+            };
+
+            _currentFileProgress = new ProgressBar
+            {
+                Minimum = 0,
+                Maximum = fileSize,
+                Height = 10,
+                Margin = new Thickness(0, 5, 0, 5),
+                Foreground = Brushes.OrangeRed // ✅ màu cam cho bên gửi
+            };
+
+            _currentFilePanel.Children.Add(txt);
+            _currentFilePanel.Children.Add(_currentFileProgress);
+
+            chatPanel.Children.Add(_currentFilePanel);
+            ScrollToBottom();
+        }
+
 
         private void UpdateFileProgress(long receivedBytes)
         {
@@ -479,6 +507,10 @@ namespace WpfChatClient
                 string fileName = System.IO.Path.GetFileName(filePath);
                 long fileSize = new System.IO.FileInfo(filePath).Length;
 
+                // Hiển thị UI Upload trước khi gửi
+                Dispatcher.Invoke(() => ShowFileSendingUI(fileName, fileSize));
+
+                // Gửi thông tin file trước
                 var fileInfoMessage = new ChatMessage
                 {
                     Username = _username,
@@ -487,7 +519,7 @@ namespace WpfChatClient
                 };
                 await SendMessageAsync(fileInfoMessage);
 
-                byte[] buffer = new byte[256 * 1024];
+                byte[] buffer = new byte[256 * 1024]; // 256KB/chunk
                 using (var fs = System.IO.File.OpenRead(filePath))
                 {
                     int bytesRead;
@@ -502,10 +534,15 @@ namespace WpfChatClient
                             Data = Convert.ToBase64String(buffer, 0, bytesRead),
                             MessageType = "filechunk"
                         };
+
                         await SendFileChunkAsync(chunkMsg);
 
+                        // Cập nhật thanh progress trong chat
                         Dispatcher.Invoke(() =>
                         {
+                            if (_currentFileProgress != null)
+                                _currentFileProgress.Value = sent;
+
                             lblStatus.Text = $"Uploading {fileName}: {sent * 100 / fileSize}%";
                         });
                     }
@@ -514,9 +551,12 @@ namespace WpfChatClient
                 Dispatcher.Invoke(() =>
                 {
                     lblStatus.Text = $"Upload complete: {fileName}";
+                    if (_currentFileProgress != null)
+                        _currentFileProgress.Value = fileSize; // Đầy 100%
                 });
             }
         }
+
 
         private async Task SendFileChunkAsync(FileChunkMessage chunk)
         {
