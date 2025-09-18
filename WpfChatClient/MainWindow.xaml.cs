@@ -194,7 +194,7 @@ namespace WpfChatClient
         }
 
         private string _receivingFile;
-        private FileStream _fileStream;
+        private MemoryStream _receivedFileBuffer;
         private long _expectedFileSize;
         private long _bytesReceived;
 
@@ -243,13 +243,12 @@ namespace WpfChatClient
                                     continue;
                                 }
 
-                                string fileName = parts[0];
-                                _receivingFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), fileName);
-                                _fileStream = new FileStream(_receivingFile, FileMode.Create, FileAccess.Write);
+                                _receivingFile = parts[0];
                                 _expectedFileSize = fileSize;
                                 _bytesReceived = 0;
+                                _receivedFileBuffer = new MemoryStream();
 
-                                Dispatcher.Invoke(() => AddMessage("System", $"Receiving file: {fileName} ({fileSize / 1024.0 / 1024.0:F2} MB)", "system"));
+                                Dispatcher.Invoke(() => AddMessage("System", $"Receiving file: {_receivingFile} ({fileSize / 1024.0 / 1024.0:F2} MB)", "system"));
                                 continue;
                             }
 
@@ -257,22 +256,40 @@ namespace WpfChatClient
                             if (chatMessage.MessageType == "filechunk")
                             {
                                 var chunkMsg = JsonSerializer.Deserialize<FileChunkMessage>(singleJson);
-                                if (chunkMsg?.Data == null || _fileStream == null) continue;
+                                if (chunkMsg?.Data == null || _receivedFileBuffer == null) continue;
 
                                 try
                                 {
                                     byte[] fileBytes = Convert.FromBase64String(chunkMsg.Data);
-                                    await _fileStream.WriteAsync(fileBytes, 0, fileBytes.Length);
+                                    await _receivedFileBuffer.WriteAsync(fileBytes, 0, fileBytes.Length);
                                     _bytesReceived += fileBytes.Length;
 
-                                    Dispatcher.Invoke(() => lblStatus.Text = $"Downloading {chunkMsg.FileName}: {_bytesReceived * 100 / _expectedFileSize}%");
+                                    Dispatcher.Invoke(() => lblStatus.Text = $"Downloading {_receivingFile}: {_bytesReceived * 100 / _expectedFileSize}%");
 
                                     if (_bytesReceived >= _expectedFileSize)
                                     {
-                                        _fileStream.Close();
-                                        _fileStream = null;
-                                        Dispatcher.Invoke(() => AddMessage("System", $"File saved to: {_receivingFile}", "system"));
-                                        Dispatcher.Invoke(() => lblStatus.Text = "Download complete");
+                                        // Khi nhận xong, hỏi người dùng có muốn lưu file không
+                                        Dispatcher.Invoke(() =>
+                                        {
+                                            var dialog = new Microsoft.Win32.SaveFileDialog
+                                            {
+                                                FileName = _receivingFile,
+                                                Filter = "All files|*.*"
+                                            };
+
+                                            if (dialog.ShowDialog() == true)
+                                            {
+                                                File.WriteAllBytes(dialog.FileName, _receivedFileBuffer.ToArray());
+                                                AddMessage("System", $"File saved to: {dialog.FileName}", "system");
+                                            }
+                                            else
+                                            {
+                                                AddMessage("System", $"File '{_receivingFile}' was not saved.", "system");
+                                            }
+                                        });
+
+                                        _receivedFileBuffer.Dispose();
+                                        _receivedFileBuffer = null;
                                     }
                                 }
                                 catch (FormatException ex)
