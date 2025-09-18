@@ -64,6 +64,25 @@ namespace WpfChatClient
                     lblUserCount.Text = $"Users Online: {_onlineUsers.Count}"; // ✅ cập nhật số lượng
                     break;
 
+                case "userlist":
+                    // Xử lý danh sách user từ server
+                    if (username == "ServerUserList")
+                    {
+                        _onlineUsers.Clear();
+                        if (!string.IsNullOrEmpty(message))
+                        {
+                            var users = message.Split(',');
+                            foreach (var user in users)
+                            {
+                                if (!string.IsNullOrWhiteSpace(user))
+                                    _onlineUsers.Add(user.Trim());
+                            }
+                        }
+                        lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
+                        return; // Không hiển thị message này trong chat
+                    }
+                    break;
+
                 case "system":
                     displayMessage = $"[{timestamp}] {message}";
                     break;
@@ -73,23 +92,22 @@ namespace WpfChatClient
                     break;
 
                 default:
-                    return;
+                    return; // Bỏ qua message type không xác định
             }
 
+            // Chỉ hiển thị message nếu có nội dung
             if (!string.IsNullOrEmpty(displayMessage))
             {
-                Dispatcher.Invoke(() =>
+                lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
+                var textBlock = new TextBlock
                 {
-                    var textBlock = new TextBlock
-                    {
-                        Text = displayMessage,
-                        TextWrapping = TextWrapping.Wrap,
-                        FontFamily = new FontFamily("Segoe UI Emoji"),
-                        Margin = new Thickness(5, 2, 5, 2)
-                    };
-                    chatPanel.Children.Add(textBlock);
-                    ScrollToBottom();
-                });
+                    Text = displayMessage,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontFamily = new FontFamily("Segoe UI Emoji"),
+                    Margin = new Thickness(5, 2, 5, 2)
+                };
+                chatPanel.Children.Add(textBlock);
+                scrollViewer.ScrollToEnd();
             }
         }
 
