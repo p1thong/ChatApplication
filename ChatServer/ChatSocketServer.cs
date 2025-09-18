@@ -48,6 +48,7 @@ namespace ChatServer
         {
             var clientInfo = new ClientInfo { Socket = clientSocket };
             var buffer = new byte[4096];
+            var sb = new StringBuilder();
 
             try
             {
@@ -56,34 +57,64 @@ namespace ChatServer
                     var received = await ReceiveAsync(clientSocket, buffer);
                     if (received == 0) break;
 
-                    var messageJson = Encoding.UTF8.GetString(buffer, 0, received);
-                    var chatMessage = JsonSerializer.Deserialize<ChatMessage>(messageJson);
+                    sb.Append(Encoding.UTF8.GetString(buffer, 0, received));
+                    string data = sb.ToString();
 
-                    if (chatMessage != null)
+                    int newlineIndex;
+                    while ((newlineIndex = data.IndexOf('\n')) >= 0)
                     {
-                        if (chatMessage.MessageType == "join")
-                        {
-                            clientInfo.Username = chatMessage.Username;
-                            _clients.TryAdd(clientInfo.Id, clientInfo);
-                            _logger.LogInformation($"User {chatMessage.Username} joined the chat");
+                        string singleJson = data[..newlineIndex];
+                        data = data[(newlineIndex + 1)..];
 
-                            // Gửi message join với username thật, không phải "System"
-                            await BroadcastMessageAsync(new ChatMessage
+                        try
+                        {
+                            var chatMessage = JsonSerializer.Deserialize<ChatMessage>(singleJson);
+                            if (chatMessage == null) continue;
+
+                            switch (chatMessage.MessageType)
                             {
-                                Username = chatMessage.Username,
-                                Message = "",
-                                MessageType = "join"
-                            });
+                                case "join":
+                                    clientInfo.Username = chatMessage.Username;
+                                    _clients.TryAdd(clientInfo.Id, clientInfo);
+                                    _logger.LogInformation($"User {chatMessage.Username} joined");
+                                    await BroadcastMessageAsync(new ChatMessage
+                                    {
+                                        Username = chatMessage.Username,
+                                        MessageType = "join"
+                                    });
+                                    await SendUserListToAllClientsAsync();
+                                    break;
 
-                            // Gửi danh sách tất cả users hiện tại cho client mới join
-                            await SendUserListToAllClientsAsync();
+                                case "message":
+                                case "fileinfo":
+                                    // message + fileinfo vẫn dùng ChatMessage
+                                    await BroadcastMessageAsync(chatMessage);
+                                    break;
+
+                                case "filechunk":
+                                    // 🔧 Deserialize lại thành FileChunkMessage để giữ Data
+                                    var fileChunk = JsonSerializer.Deserialize<FileChunkMessage>(singleJson);
+                                    if (fileChunk != null)
+                                    {
+                                        var json = JsonSerializer.Serialize(fileChunk) + "\n";
+                                        var bytes = Encoding.UTF8.GetBytes(json);
+                                        await BroadcastRawAsync(bytes);
+                                    }
+                                    break;
+
+                                default:
+                                    _logger.LogWarning($"Unknown message type: {chatMessage.MessageType}");
+                                    break;
+                            }
                         }
-                        else if (chatMessage.MessageType == "message")
+                        catch (JsonException ex)
                         {
-                            _logger.LogInformation($"Message from {chatMessage.Username}: {chatMessage.Message}");
-                            await BroadcastMessageAsync(chatMessage);
+                            _logger.LogError(ex, $"Invalid JSON: {singleJson}");
                         }
                     }
+
+                    sb.Clear();
+                    sb.Append(data);
                 }
             }
             catch (Exception ex)
@@ -95,22 +126,50 @@ namespace ChatServer
                 if (_clients.TryRemove(clientInfo.Id, out _))
                 {
                     _logger.LogInformation($"User {clientInfo.Username} disconnected");
-
-                    // Gửi message leave với username thật
                     await BroadcastMessageAsync(new ChatMessage
                     {
                         Username = clientInfo.Username,
-                        Message = "",
                         MessageType = "leave"
                     });
-
-                    // Cập nhật danh sách user sau khi có người rời
                     await SendUserListToAllClientsAsync();
                 }
 
                 clientSocket.Close();
             }
         }
+
+        private async Task BroadcastRawAsync(byte[] messageBytes)
+        {
+            _logger.LogInformation($"Broadcasting raw message ({messageBytes.Length} bytes)");
+
+            var disconnectedClients = new List<string>();
+            foreach (var client in _clients.Values)
+            {
+                try
+                {
+                    if (client.Socket.Connected)
+                    {
+                        await SendAsync(client.Socket, messageBytes);
+                    }
+                    else
+                    {
+                        disconnectedClients.Add(client.Id);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"Error sending raw message to {client.Username}");
+                    disconnectedClients.Add(client.Id);
+                }
+            }
+
+            foreach (var id in disconnectedClients)
+            {
+                _clients.TryRemove(id, out _);
+            }
+        }
+
+
 
         private async Task SendUserListToAllClientsAsync()
         {

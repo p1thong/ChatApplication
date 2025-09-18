@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.IO;
 
 namespace WpfChatClient
 {
@@ -183,7 +184,7 @@ namespace WpfChatClient
 
         private async Task SendMessageAsync(ChatMessage message)
         {
-            var messageJson = JsonSerializer.Serialize(message);
+            var messageJson = JsonSerializer.Serialize(message) + "\n";
             var messageBytes = Encoding.UTF8.GetBytes(messageJson);
 
             await Task.Factory.FromAsync(
@@ -192,19 +193,23 @@ namespace WpfChatClient
                 null);
         }
 
+        private string _receivingFile;
+        private FileStream _fileStream;
+        private long _expectedFileSize;
+        private long _bytesReceived;
+
         private async Task ReceiveMessagesAsync()
         {
             var buffer = new byte[4096];
-            var sb = new StringBuilder(); // 👈 dùng để giữ message chưa trọn vẹn
+            var sb = new StringBuilder();
 
             try
             {
                 while (_isConnected && _clientSocket.Connected)
                 {
-                    var received = await Task.Factory.FromAsync<int>(
-                        (callback, state) => _clientSocket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, callback, state),
-                        _clientSocket.EndReceive,
-                        null);
+                    int received = await Task.Factory.FromAsync<int>(
+                        (cb, state) => _clientSocket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, cb, state),
+                        _clientSocket.EndReceive, null);
 
                     if (received == 0) break;
 
@@ -214,19 +219,71 @@ namespace WpfChatClient
                     int newlineIndex;
                     while ((newlineIndex = data.IndexOf('\n')) >= 0)
                     {
-                        var singleJson = data[..newlineIndex]; // lấy 1 message
-                        data = data[(newlineIndex + 1)..];      // cắt phần đã xử lý
+                        string singleJson = data[..newlineIndex];
+                        data = data[(newlineIndex + 1)..];
 
                         try
                         {
                             var chatMessage = JsonSerializer.Deserialize<ChatMessage>(singleJson);
-                            if (chatMessage != null)
+                            if (chatMessage == null) continue;
+
+                            // 🟢 Xử lý file info
+                            if (chatMessage.MessageType == "fileinfo")
                             {
-                                Dispatcher.Invoke(() =>
+                                if (string.IsNullOrEmpty(chatMessage.Message))
                                 {
-                                    AddMessage(chatMessage.Username, chatMessage.Message, chatMessage.MessageType);
-                                });
+                                    Dispatcher.Invoke(() => AddMessage("System", "Received empty file info!", "error"));
+                                    continue;
+                                }
+
+                                var parts = chatMessage.Message.Split('|');
+                                if (parts.Length < 2 || !long.TryParse(parts[1], out long fileSize))
+                                {
+                                    Dispatcher.Invoke(() => AddMessage("System", "Invalid file info format!", "error"));
+                                    continue;
+                                }
+
+                                string fileName = parts[0];
+                                _receivingFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), fileName);
+                                _fileStream = new FileStream(_receivingFile, FileMode.Create, FileAccess.Write);
+                                _expectedFileSize = fileSize;
+                                _bytesReceived = 0;
+
+                                Dispatcher.Invoke(() => AddMessage("System", $"Receiving file: {fileName} ({fileSize / 1024.0 / 1024.0:F2} MB)", "system"));
+                                continue;
                             }
+
+                            // 🟢 Xử lý file chunk
+                            if (chatMessage.MessageType == "filechunk")
+                            {
+                                var chunkMsg = JsonSerializer.Deserialize<FileChunkMessage>(singleJson);
+                                if (chunkMsg?.Data == null || _fileStream == null) continue;
+
+                                try
+                                {
+                                    byte[] fileBytes = Convert.FromBase64String(chunkMsg.Data);
+                                    await _fileStream.WriteAsync(fileBytes, 0, fileBytes.Length);
+                                    _bytesReceived += fileBytes.Length;
+
+                                    Dispatcher.Invoke(() => lblStatus.Text = $"Downloading {chunkMsg.FileName}: {_bytesReceived * 100 / _expectedFileSize}%");
+
+                                    if (_bytesReceived >= _expectedFileSize)
+                                    {
+                                        _fileStream.Close();
+                                        _fileStream = null;
+                                        Dispatcher.Invoke(() => AddMessage("System", $"File saved to: {_receivingFile}", "system"));
+                                        Dispatcher.Invoke(() => lblStatus.Text = "Download complete");
+                                    }
+                                }
+                                catch (FormatException ex)
+                                {
+                                    Dispatcher.Invoke(() => AddMessage("System", $"Invalid file chunk: {ex.Message}", "error"));
+                                }
+                                continue;
+                            }
+
+                            // 🟢 Xử lý message bình thường
+                            Dispatcher.Invoke(() => AddMessage(chatMessage.Username, chatMessage.Message, chatMessage.MessageType));
                         }
                         catch (JsonException ex)
                         {
@@ -235,7 +292,7 @@ namespace WpfChatClient
                     }
 
                     sb.Clear();
-                    sb.Append(data); // giữ lại phần còn dư chưa thành message hoàn chỉnh
+                    sb.Append(data);
                 }
             }
             catch (Exception ex)
@@ -258,6 +315,7 @@ namespace WpfChatClient
             txtMessage.IsEnabled = connected;
             btnSend.IsEnabled = connected;
             btnEmoji.IsEnabled = connected;
+            btnSendFile.IsEnabled = connected;
             txtServer.IsEnabled = !connected;
             txtPort.IsEnabled = !connected;
             txtUsername.IsEnabled = !connected;
@@ -337,5 +395,68 @@ namespace WpfChatClient
 
             emojiPopup.IsOpen = true;
         }
+        private async void BtnSendFile_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog();
+            if (dialog.ShowDialog() == true)
+            {
+                string filePath = dialog.FileName;
+                string fileName = System.IO.Path.GetFileName(filePath);
+                long fileSize = new System.IO.FileInfo(filePath).Length;
+
+                // Gửi thông tin file trước
+                var fileInfoMessage = new ChatMessage
+                {
+                    Username = _username,
+                    MessageType = "fileinfo",
+                    Message = $"{fileName}|{fileSize}"
+                };
+                await SendMessageAsync(fileInfoMessage);
+
+                // byte[] buffer = new byte[64 * 1024]; // 64 KB
+                byte[] buffer = new byte[256 * 1024]; // 256 KB per chunk
+                using (var fs = System.IO.File.OpenRead(filePath))
+                {
+                    int bytesRead;
+                    long sent = 0;
+                    while ((bytesRead = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    {
+                        sent += bytesRead;
+                        var chunkMsg = new FileChunkMessage
+                        {
+                            Username = _username,
+                            FileName = fileName,
+                            Data = Convert.ToBase64String(buffer, 0, bytesRead),
+                            MessageType = "filechunk"
+                        };
+                        await SendFileChunkAsync(chunkMsg);
+
+                        Dispatcher.Invoke(() =>
+                        {
+                            lblStatus.Text = $"Uploading {fileName}: {sent * 100 / fileSize}%";
+                        });
+                    }
+
+                }
+
+                Dispatcher.Invoke(() =>
+                {
+                    lblStatus.Text = $"Upload complete: {fileName}";
+                });
+            }
+        }
+
+        private async Task SendFileChunkAsync(FileChunkMessage chunk)
+        {
+            var messageJson = JsonSerializer.Serialize(chunk) + "\n";
+            var messageBytes = Encoding.UTF8.GetBytes(messageJson);
+
+            await Task.Factory.FromAsync(
+                (callback, state) => _clientSocket.BeginSend(messageBytes, 0, messageBytes.Length, SocketFlags.None, callback, state),
+                _clientSocket.EndSend,
+                null);
+        }
+
+
     }
 }
