@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.ObjectModel;
+using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -20,18 +21,14 @@ namespace WpfChatClient
         private string _username;
 
         private Popup emojiPopup;
-        private ObservableCollection<string> _onlineUsers = new ObservableCollection<string>();
+        private ObservableCollection<string> _onlineUsers = new();
 
-        // ==== Biến nhận file ====
-        private string _receivingFile;
-        private MemoryStream _receivedFileBuffer;
-        private long _expectedFileSize;
-        private long _bytesReceived;
-
-        // UI cho phần nhận file
+        // ==== Gửi file UI ====
         private StackPanel _currentFilePanel;
         private ProgressBar _currentFileProgress;
-        private Button _currentSaveButton;
+
+        // ==== Nhận file ====
+        private Dictionary<string, FileTransferContext> _fileTransfers = new();
 
         public MainWindow()
         {
@@ -40,6 +37,7 @@ namespace WpfChatClient
             lblUserCount.Text = "Users Online: 0";
         }
 
+        // ===================== CHAT =====================
         private void AddMessage(string username, string message, string messageType)
         {
             var timestamp = DateTime.Now.ToString("HH:mm:ss");
@@ -55,17 +53,16 @@ namespace WpfChatClient
                     displayMessage = $"[{timestamp}] {username} joined the chat.";
                     if (username != "System" && !_onlineUsers.Contains(username))
                         _onlineUsers.Add(username);
-                    lblUserCount.Text = $"Users Online: {_onlineUsers.Count}"; // ✅ cập nhật số lượng
+                    lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
                     break;
 
                 case "leave":
                     displayMessage = $"[{timestamp}] {username} left the chat.";
                     _onlineUsers.Remove(username);
-                    lblUserCount.Text = $"Users Online: {_onlineUsers.Count}"; // ✅ cập nhật số lượng
+                    lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
                     break;
 
                 case "userlist":
-                    // Xử lý danh sách user từ server
                     if (username == "ServerUserList")
                     {
                         _onlineUsers.Clear();
@@ -79,7 +76,7 @@ namespace WpfChatClient
                             }
                         }
                         lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
-                        return; // Không hiển thị message này trong chat
+                        return; // không in ra chat
                     }
                     break;
 
@@ -92,10 +89,9 @@ namespace WpfChatClient
                     break;
 
                 default:
-                    return; // Bỏ qua message type không xác định
+                    return;
             }
 
-            // Chỉ hiển thị message nếu có nội dung
             if (!string.IsNullOrEmpty(displayMessage))
             {
                 lblUserCount.Text = $"Users Online: {_onlineUsers.Count}";
@@ -107,10 +103,9 @@ namespace WpfChatClient
                     Margin = new Thickness(5, 2, 5, 2)
                 };
                 chatPanel.Children.Add(textBlock);
-                scrollViewer.ScrollToEnd();
+                ScrollToBottom();
             }
         }
-
 
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
@@ -132,7 +127,7 @@ namespace WpfChatClient
                 _isConnected = true;
                 UpdateUI(true);
 
-                // Gửi thông điệp join lên server để broadcast
+                // Gửi join message
                 var joinMessage = new ChatMessage
                 {
                     Username = _username,
@@ -201,150 +196,148 @@ namespace WpfChatClient
                 null);
         }
 
+        // ===================== RECEIVE =====================
         private async Task ReceiveMessagesAsync()
         {
             var buffer = new byte[4096];
             var sb = new StringBuilder();
 
-            try
+            while (_isConnected && _clientSocket.Connected)
             {
-                while (_isConnected && _clientSocket.Connected)
+                int received = await Task.Factory.FromAsync<int>(
+                    (cb, state) => _clientSocket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, cb, state),
+                    _clientSocket.EndReceive, null);
+
+                if (received == 0) break;
+
+                sb.Append(Encoding.UTF8.GetString(buffer, 0, received));
+                string data = sb.ToString();
+
+                int newlineIndex;
+                while ((newlineIndex = data.IndexOf('\n')) >= 0)
                 {
-                    int received = await Task.Factory.FromAsync<int>(
-                        (cb, state) => _clientSocket.BeginReceive(buffer, 0, buffer.Length, SocketFlags.None, cb, state),
-                        _clientSocket.EndReceive, null);
+                    string singleJson = data[..newlineIndex];
+                    data = data[(newlineIndex + 1)..];
 
-                    if (received == 0) break;
+                    var chatMessage = JsonSerializer.Deserialize<ChatMessage>(singleJson);
+                    if (chatMessage == null) continue;
 
-                    sb.Append(Encoding.UTF8.GetString(buffer, 0, received));
-                    string data = sb.ToString();
-
-                    int newlineIndex;
-                    while ((newlineIndex = data.IndexOf('\n')) >= 0)
+                    if (chatMessage.MessageType == "fileinfo")
                     {
-                        string singleJson = data[..newlineIndex];
-                        data = data[(newlineIndex + 1)..];
+                        var parts = chatMessage.Message.Split('|');
+                        if (parts.Length < 2 || !long.TryParse(parts[1], out long fileSize)) continue;
 
-                        try
+                        // Bỏ qua chính mình
+                        if (chatMessage.Username == _username) continue;
+
+                        var ctx = new FileTransferContext
                         {
-                            var chatMessage = JsonSerializer.Deserialize<ChatMessage>(singleJson);
-                            if (chatMessage == null) continue;
+                            FileName = parts[0],
+                            FileSize = fileSize
+                        };
 
-                            // === Nhận thông tin file ===
-                            if (chatMessage.MessageType == "fileinfo")
-                            {
-                                var parts = chatMessage.Message.Split('|');
-                                if (parts.Length < 2 || !long.TryParse(parts[1], out long fileSize))
-                                {
-                                    Dispatcher.Invoke(() => AddMessage("System", "Invalid file info format!", "error"));
-                                    continue;
-                                }
+                        _fileTransfers[ctx.FileName] = ctx;
 
-                                _receivingFile = parts[0];
-                                _expectedFileSize = fileSize;
-                                _bytesReceived = 0;
-                                _receivedFileBuffer = new MemoryStream();
-
-                                Dispatcher.Invoke(() =>
-                                {
-                                    ShowFileReceivingUI(_receivingFile, _expectedFileSize);
-                                    lblStatus.Text = $"Receiving {_receivingFile}...";
-                                });
-
-                                continue;
-                            }
-
-                            // === Nhận chunk dữ liệu file ===
-                            if (chatMessage.MessageType == "filechunk")
-                            {
-                                var chunkMsg = JsonSerializer.Deserialize<FileChunkMessage>(singleJson);
-                                if (chunkMsg?.Data == null || _receivedFileBuffer == null) continue;
-
-                                byte[] fileBytes = Convert.FromBase64String(chunkMsg.Data);
-                                await _receivedFileBuffer.WriteAsync(fileBytes, 0, fileBytes.Length);
-                                _bytesReceived += fileBytes.Length;
-
-                                Dispatcher.Invoke(() =>
-                                {
-                                    UpdateFileProgress(_bytesReceived);
-                                    lblStatus.Text = $"receiving {_receivingFile}: {_bytesReceived * 100 / _expectedFileSize}%";
-                                });
-
-                                if (_bytesReceived >= _expectedFileSize)
-                                {
-                                    Dispatcher.Invoke(() =>
-                                    {
-                                        lblStatus.Text = $"Download complete: {_receivingFile}";
-                                        EnableSaveButton();
-                                        AddMessage("System", $"File {_receivingFile} ready to save", "system");
-                                    });
-                                }
-
-                                continue;
-                            }
-
-                            Dispatcher.Invoke(() => AddMessage(chatMessage.Username, chatMessage.Message, chatMessage.MessageType));
-                        }
-                        catch (JsonException ex)
+                        Dispatcher.Invoke(() =>
                         {
-                            Dispatcher.Invoke(() => AddMessage("System", $"JSON error: {ex.Message}", "error"));
-                        }
+                            ShowFileReceivingUI(ctx);
+                            lblStatus.Text = $"Receiving {ctx.FileName}...";
+                        });
+
+                        continue;
                     }
 
-                    sb.Clear();
-                    sb.Append(data);
-                }
-            }
-            catch (Exception ex)
-            {
-                if (_isConnected)
-                {
-                    Dispatcher.Invoke(() =>
+                    if (chatMessage.MessageType == "filechunk")
                     {
-                        AddMessage("System", $"Connection lost: {ex.Message}", "error");
-                        Disconnect();
-                    });
+                        var chunkMsg = JsonSerializer.Deserialize<FileChunkMessage>(singleJson);
+                        if (chunkMsg == null) continue;
+
+                        if (!_fileTransfers.TryGetValue(chunkMsg.FileName, out var ctx)) continue;
+
+                        byte[] fileBytes = Convert.FromBase64String(chunkMsg.Data);
+                        await ctx.Buffer.WriteAsync(fileBytes, 0, fileBytes.Length);
+                        ctx.BytesReceived += fileBytes.Length;
+
+                        Dispatcher.Invoke(() =>
+                        {
+                            ctx.Progress.Value = ctx.BytesReceived;
+                            lblStatus.Text = $"Receiving {ctx.FileName}: {ctx.BytesReceived * 100 / ctx.FileSize}%";
+                        });
+
+                        if (ctx.BytesReceived >= ctx.FileSize)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                lblStatus.Text = $"Download complete: {ctx.FileName}";
+                                ctx.SaveButton.Visibility = Visibility.Visible;
+                                ctx.SaveButton.IsEnabled = true;
+                            });
+                        }
+
+                        continue;
+                    }
+
+                    Dispatcher.Invoke(() => AddMessage(chatMessage.Username, chatMessage.Message, chatMessage.MessageType));
                 }
+
+                sb.Clear();
+                sb.Append(data);
             }
         }
 
-        // === UI hiển thị khi nhận file ===
-        private void ShowFileReceivingUI(string fileName, long fileSize)
+        // ===================== UI FILE RECEIVE =====================
+        private void ShowFileReceivingUI(FileTransferContext ctx)
         {
-            _currentFilePanel = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(5) };
+            ctx.FilePanel = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(5) };
 
             var txt = new TextBlock
             {
-                Text = $"Receiving file: {fileName} ({fileSize / 1024.0 / 1024.0:F2} MB)",
+                Text = $"Receiving file: {ctx.FileName} ({ctx.FileSize / 1024.0 / 1024.0:F2} MB)",
                 Foreground = Brushes.Blue
             };
 
-            _currentFileProgress = new ProgressBar
+            ctx.Progress = new ProgressBar
             {
                 Minimum = 0,
-                Maximum = fileSize,
+                Maximum = ctx.FileSize,
                 Height = 10,
                 Margin = new Thickness(0, 5, 0, 5),
-                Foreground = Brushes.Blue // ✅ màu xanh cho bên nhận
+                Foreground = Brushes.Blue
             };
 
-            _currentSaveButton = new Button
+            ctx.SaveButton = new Button
             {
-                Content = $"💾 Save {fileName}",
+                Content = $"💾 Save {ctx.FileName}",
                 Visibility = Visibility.Collapsed,
                 IsEnabled = false,
                 Margin = new Thickness(0, 5, 0, 0)
             };
-            _currentSaveButton.Click += SaveReceivedFile_Click;
+            ctx.SaveButton.Click += (s, e) => SaveReceivedFile(ctx);
 
-            _currentFilePanel.Children.Add(txt);
-            _currentFilePanel.Children.Add(_currentFileProgress);
-            _currentFilePanel.Children.Add(_currentSaveButton);
+            ctx.FilePanel.Children.Add(txt);
+            ctx.FilePanel.Children.Add(ctx.Progress);
+            ctx.FilePanel.Children.Add(ctx.SaveButton);
 
-            chatPanel.Children.Add(_currentFilePanel);
+            chatPanel.Children.Add(ctx.FilePanel);
             ScrollToBottom();
         }
 
+        private void SaveReceivedFile(FileTransferContext ctx)
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = ctx.FileName,
+                Filter = "All files|*.*"
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                File.WriteAllBytes(dialog.FileName, ctx.Buffer.ToArray());
+                AddMessage("System", $"File saved to: {dialog.FileName}", "system");
+            }
+        }
+
+        // ===================== UI FILE SEND =====================
         private void ShowFileSendingUI(string fileName, long fileSize)
         {
             _currentFilePanel = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(5) };
@@ -361,7 +354,7 @@ namespace WpfChatClient
                 Maximum = fileSize,
                 Height = 10,
                 Margin = new Thickness(0, 5, 0, 5),
-                Foreground = Brushes.OrangeRed // ✅ màu cam cho bên gửi
+                Foreground = Brushes.OrangeRed
             };
 
             _currentFilePanel.Children.Add(txt);
@@ -371,43 +364,82 @@ namespace WpfChatClient
             ScrollToBottom();
         }
 
-
-        private void UpdateFileProgress(long receivedBytes)
+        private async void BtnSendFile_Click(object sender, RoutedEventArgs e)
         {
-            if (_currentFileProgress != null)
-                _currentFileProgress.Value = receivedBytes;
-        }
-
-        private void EnableSaveButton()
-        {
-            if (_currentSaveButton != null)
-            {
-                _currentSaveButton.Visibility = Visibility.Visible;
-                _currentSaveButton.IsEnabled = true;
-            }
-        }
-
-        private void SaveReceivedFile_Click(object sender, RoutedEventArgs e)
-        {
-            if (_receivedFileBuffer == null || _receivedFileBuffer.Length == 0)
-            {
-                AddMessage("System", "No file to save!", "error");
-                return;
-            }
-
-            var dialog = new Microsoft.Win32.SaveFileDialog
-            {
-                FileName = _receivingFile,
-                Filter = "All files|*.*"
-            };
-
+            var dialog = new Microsoft.Win32.OpenFileDialog();
             if (dialog.ShowDialog() == true)
             {
-                File.WriteAllBytes(dialog.FileName, _receivedFileBuffer.ToArray());
-                AddMessage("System", $"File saved to: {dialog.FileName}", "system");
-            }
+                string filePath = dialog.FileName;
+                string fileName = System.IO.Path.GetFileName(filePath);
+                long fileSize = new FileInfo(filePath).Length;
 
-            // _currentSaveButton.IsEnabled = false;
+                Dispatcher.Invoke(() => ShowFileSendingUI(fileName, fileSize));
+
+                // Gửi thông tin file
+                var fileInfoMessage = new ChatMessage
+                {
+                    Username = _username,
+                    MessageType = "fileinfo",
+                    Message = $"{fileName}|{fileSize}"
+                };
+                await SendMessageAsync(fileInfoMessage);
+
+                byte[] buffer = new byte[256 * 1024];
+                using (var fs = File.OpenRead(filePath))
+                {
+                    int bytesRead;
+                    long sent = 0;
+                    while ((bytesRead = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    {
+                        sent += bytesRead;
+                        var chunkMsg = new FileChunkMessage
+                        {
+                            Username = _username,
+                            FileName = fileName,
+                            Data = Convert.ToBase64String(buffer, 0, bytesRead),
+                            MessageType = "filechunk"
+                        };
+
+                        await SendFileChunkAsync(chunkMsg);
+
+                        Dispatcher.Invoke(() =>
+                        {
+                            if (_currentFileProgress != null)
+                                _currentFileProgress.Value = sent;
+
+                            lblStatus.Text = $"Uploading {fileName}: {sent * 100 / fileSize}%";
+                        });
+                    }
+                }
+
+                Dispatcher.Invoke(() =>
+                {
+                    lblStatus.Text = $"Upload complete: {fileName}";
+                    if (_currentFileProgress != null)
+                        _currentFileProgress.Value = fileSize;
+
+                    // reset biến để tránh ảnh hưởng lần gửi sau
+                    _currentFilePanel = null;
+                    _currentFileProgress = null;
+                });
+            }
+        }
+
+        private async Task SendFileChunkAsync(FileChunkMessage chunk)
+        {
+            var messageJson = JsonSerializer.Serialize(chunk) + "\n";
+            var messageBytes = Encoding.UTF8.GetBytes(messageJson);
+
+            await Task.Factory.FromAsync(
+                (callback, state) => _clientSocket.BeginSend(messageBytes, 0, messageBytes.Length, SocketFlags.None, callback, state),
+                _clientSocket.EndSend,
+                null);
+        }
+
+        // ===================== UI =====================
+        private void ScrollToBottom()
+        {
+            Dispatcher.Invoke(() => scrollViewer.ScrollToEnd());
         }
 
         private void UpdateUI(bool connected)
@@ -449,6 +481,7 @@ namespace WpfChatClient
             base.OnClosed(e);
         }
 
+        // ===================== EMOJI =====================
         private void BtnEmoji_Click(object sender, RoutedEventArgs e)
         {
             if (emojiPopup == null)
@@ -497,84 +530,5 @@ namespace WpfChatClient
 
             emojiPopup.IsOpen = true;
         }
-
-        private async void BtnSendFile_Click(object sender, RoutedEventArgs e)
-        {
-            var dialog = new Microsoft.Win32.OpenFileDialog();
-            if (dialog.ShowDialog() == true)
-            {
-                string filePath = dialog.FileName;
-                string fileName = System.IO.Path.GetFileName(filePath);
-                long fileSize = new System.IO.FileInfo(filePath).Length;
-
-                // Hiển thị UI Upload trước khi gửi
-                Dispatcher.Invoke(() => ShowFileSendingUI(fileName, fileSize));
-
-                // Gửi thông tin file trước
-                var fileInfoMessage = new ChatMessage
-                {
-                    Username = _username,
-                    MessageType = "fileinfo",
-                    Message = $"{fileName}|{fileSize}"
-                };
-                await SendMessageAsync(fileInfoMessage);
-
-                byte[] buffer = new byte[256 * 1024]; // 256KB/chunk
-                using (var fs = System.IO.File.OpenRead(filePath))
-                {
-                    int bytesRead;
-                    long sent = 0;
-                    while ((bytesRead = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
-                    {
-                        sent += bytesRead;
-                        var chunkMsg = new FileChunkMessage
-                        {
-                            Username = _username,
-                            FileName = fileName,
-                            Data = Convert.ToBase64String(buffer, 0, bytesRead),
-                            MessageType = "filechunk"
-                        };
-
-                        await SendFileChunkAsync(chunkMsg);
-
-                        // Cập nhật thanh progress trong chat
-                        Dispatcher.Invoke(() =>
-                        {
-                            if (_currentFileProgress != null)
-                                _currentFileProgress.Value = sent;
-
-                            lblStatus.Text = $"Uploading {fileName}: {sent * 100 / fileSize}%";
-                        });
-                    }
-                }
-
-                Dispatcher.Invoke(() =>
-                {
-                    lblStatus.Text = $"Upload complete: {fileName}";
-                    if (_currentFileProgress != null)
-                        _currentFileProgress.Value = fileSize; // Đầy 100%
-                });
-            }
-        }
-
-
-        private async Task SendFileChunkAsync(FileChunkMessage chunk)
-        {
-            var messageJson = JsonSerializer.Serialize(chunk) + "\n";
-            var messageBytes = Encoding.UTF8.GetBytes(messageJson);
-
-            await Task.Factory.FromAsync(
-                (callback, state) => _clientSocket.BeginSend(messageBytes, 0, messageBytes.Length, SocketFlags.None, callback, state),
-                _clientSocket.EndSend,
-                null);
-        }
-        private void ScrollToBottom()
-        {
-            Dispatcher.Invoke(() =>
-            {
-                scrollViewer.ScrollToEnd();
-            });
-        }
-
     }
 }
